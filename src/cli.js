@@ -49,6 +49,10 @@ export function detectInvokingAgent(env = process.env) {
   return ["CODEX_SANDBOX", "CODEX_THREAD_ID"].some((key) => Object.hasOwn(env, key)) ? "codex" : "generic";
 }
 
+export function shouldNarratePollWait({ timeoutMs, isTTY }) {
+  return !timeoutMs && Boolean(isTTY);
+}
+
 export function pollExecutionGuidance({ agent = "generic" } = {}) {
   const sharedGuidance = POLL_WAKE_PATH_RULES.join(" ");
   const agentGuidance = agent === "codex" ? ` ${CODEX_POLL_WAKE_PATH_GUIDANCE}` : "";
@@ -270,7 +274,9 @@ async function pollCommand(args) {
     process.on("SIGINT", onPollSignal);
     process.on("SIGTERM", onPollSignal);
   }
-  const waitReporter = timeoutMs ? null : startPollWaitReporter({ file: absolute });
+  const waitReporter = shouldNarratePollWait({ timeoutMs, isTTY: process.stderr.isTTY })
+    ? startPollWaitReporter({ file: absolute })
+    : null;
   try {
     const response = await fetchJson(`${baseUrl}/api/poll?file=${encodeURIComponent(absolute)}${timeoutQuery}`, {
       retries: 3,
