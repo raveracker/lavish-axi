@@ -40,6 +40,7 @@ import {
   shutdownServerOnPort,
   shouldForceRestartForLocalBuild,
   shouldKillProcessOnPort,
+  shouldNarratePollWait,
   shouldOpenBrowser,
   shouldRestartServer,
   startPollWaitReporter,
@@ -49,6 +50,36 @@ import {
 } from "../src/cli.js";
 import { DESIGN_PRIORITY_RULE, DESIGN_SYSTEM_HINT } from "../src/design-reference.js";
 import { serve } from "../src/server.js";
+import { canonicalFile, sessionKey } from "../src/session-store.js";
+
+async function waitForPollListening(base, key, timeoutMs = 10_000) {
+  const controller = new AbortController();
+  const res = await fetch(`${base}/events/${key}`, { signal: controller.signal });
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const deadline = Date.now() + timeoutMs;
+  try {
+    while (true) {
+      const match = buffer.match(/^event: agent-presence\ndata: (.+)\n\n/m);
+      if (match) {
+        buffer = buffer.replace(match[0], "");
+        if (JSON.parse(match[1]).state === "listening") return;
+        continue;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("timed out waiting for listening presence");
+      const { value, done } = await Promise.race([
+        reader.read(),
+        new Promise((resolve) => setTimeout(() => resolve({ done: true, timedOut: true }), remaining)),
+      ]);
+      if (done) throw new Error("presence stream closed before listening");
+      buffer += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    controller.abort();
+  }
+}
 
 function setupHooksEnv(homeDir, stateDir) {
   // eslint-disable-next-line no-unused-vars
@@ -1347,18 +1378,28 @@ test("poll wait reporter writes a banner immediately and heartbeats on an interv
   assert.equal(lines.length, countAfterStop, "stops heartbeating after stop()");
 });
 
-test("spawned poll announces the wait on stderr and leaves re-run guidance when killed", async () => {
+test("shouldNarratePollWait narrates only in an interactive terminal", () => {
+  assert.equal(shouldNarratePollWait({ timeoutMs: undefined, isTTY: true }), true);
+  assert.equal(shouldNarratePollWait({ timeoutMs: undefined, isTTY: undefined }), false);
+  assert.equal(shouldNarratePollWait({ timeoutMs: undefined, isTTY: false }), false);
+  assert.equal(shouldNarratePollWait({ timeoutMs: "5000", isTTY: true }), false);
+});
+
+test("spawned poll with piped stderr stays silent yet leaves re-run guidance when killed", async () => {
   const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-poll-wait-test-`);
   const artifact = `${stateDir}/artifact.html`;
   await writeFile(artifact, "<html><body>hello</body></html>", "utf8");
   const server = await serve({ port: 0, stateFile: `${stateDir}/state.json`, version: VERSION });
+  const base = `http://127.0.0.1:${server.port}`;
   try {
-    const sessionResponse = await fetch(`http://127.0.0.1:${server.port}/api/sessions`, {
+    const sessionResponse = await fetch(`${base}/api/sessions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ file: artifact }),
     });
     assert.ok(sessionResponse.ok, "session opens");
+
+    const key = sessionKey(await canonicalFile(artifact));
 
     const child = spawn(
       process.execPath,
@@ -1370,15 +1411,12 @@ test("spawned poll announces the wait on stderr and leaves re-run guidance when 
     );
 
     let stderr = "";
-    const sawBanner = new Promise((resolve, reject) => {
-      child.stderr.on("data", (chunk) => {
-        stderr += chunk.toString();
-        if (stderr.includes("Long-polling for user feedback")) resolve();
-      });
-      child.on("error", reject);
-      setTimeout(() => reject(new Error(`no banner on stderr, got: ${stderr}`)), 15_000).unref();
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
     });
-    await sawBanner;
+
+    await waitForPollListening(base, key);
+    assert.doesNotMatch(stderr, /Long-polling for user feedback/, "piped stderr suppresses the wait banner");
 
     // Wait for "close" rather than "exit": "exit" can fire while the final stderr chunk is
     // still in flight, so asserting on stderr at "exit" races the guidance message.
