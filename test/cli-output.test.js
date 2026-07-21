@@ -40,7 +40,7 @@ import {
   shutdownServerOnPort,
   shouldForceRestartForLocalBuild,
   shouldKillProcessOnPort,
-  shouldNarratePollWait,
+  shouldNarratePollWaitTicks,
   shouldOpenBrowser,
   shouldRestartServer,
   startPollWaitReporter,
@@ -67,11 +67,12 @@ async function waitForPollListening(base, key, timeoutMs = 10_000) {
         if (JSON.parse(match[1]).state === "listening") return;
         continue;
       }
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) throw new Error("timed out waiting for listening presence");
+      const remaining = Math.max(1, deadline - Date.now());
       const { value, done } = await Promise.race([
         reader.read(),
-        new Promise((resolve) => setTimeout(() => resolve({ done: true, timedOut: true }), remaining)),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("timed out waiting for listening presence")), remaining),
+        ),
       ]);
       if (done) throw new Error("presence stream closed before listening");
       buffer += decoder.decode(value, { stream: true });
@@ -1378,14 +1379,36 @@ test("poll wait reporter writes a banner immediately and heartbeats on an interv
   assert.equal(lines.length, countAfterStop, "stops heartbeating after stop()");
 });
 
-test("shouldNarratePollWait narrates only in an interactive terminal", () => {
-  assert.equal(shouldNarratePollWait({ timeoutMs: undefined, isTTY: true }), true);
-  assert.equal(shouldNarratePollWait({ timeoutMs: undefined, isTTY: undefined }), false);
-  assert.equal(shouldNarratePollWait({ timeoutMs: undefined, isTTY: false }), false);
-  assert.equal(shouldNarratePollWait({ timeoutMs: "5000", isTTY: true }), false);
+test("poll wait reporter still banners without ticks when narration is off", async () => {
+  const lines = [];
+  const reporter = startPollWaitReporter({
+    file: "/tmp/report.html",
+    write: (line) => {
+      lines.push(line);
+    },
+    intervalMs: 5,
+    narrateTicks: false,
+  });
+
+  try {
+    assert.equal(lines.length, 1, "the one-shot not-hung banner is unconditional");
+    assert.match(lines[0], /Long-polling for user feedback/);
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(lines.length, 1, "suppresses the recurring heartbeat lines");
+  } finally {
+    reporter.stop();
+  }
 });
 
-test("spawned poll with piped stderr stays silent yet leaves re-run guidance when killed", async () => {
+test("shouldNarratePollWaitTicks heartbeats only in an interactive terminal", () => {
+  assert.equal(shouldNarratePollWaitTicks({ timeoutMs: undefined, isTTY: true }), true);
+  assert.equal(shouldNarratePollWaitTicks({ timeoutMs: undefined, isTTY: undefined }), false);
+  assert.equal(shouldNarratePollWaitTicks({ timeoutMs: undefined, isTTY: false }), false);
+  assert.equal(shouldNarratePollWaitTicks({ timeoutMs: "5000", isTTY: true }), false);
+});
+
+test("spawned poll with piped stderr banners once, skips ticks, and leaves re-run guidance when killed", async () => {
   const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-poll-wait-test-`);
   const artifact = `${stateDir}/artifact.html`;
   await writeFile(artifact, "<html><body>hello</body></html>", "utf8");
@@ -1416,7 +1439,12 @@ test("spawned poll with piped stderr stays silent yet leaves re-run guidance whe
     });
 
     await waitForPollListening(base, key);
-    assert.doesNotMatch(stderr, /Long-polling for user feedback/, "piped stderr suppresses the wait banner");
+    assert.equal(
+      stderr.match(/Long-polling for user feedback/g)?.length,
+      1,
+      "piped stderr still gets the one-shot not-hung banner",
+    );
+    assert.doesNotMatch(stderr, /Still waiting for user feedback/, "piped stderr suppresses the wait ticks");
 
     // Wait for "close" rather than "exit": "exit" can fire while the final stderr chunk is
     // still in flight, so asserting on stderr at "exit" races the guidance message.

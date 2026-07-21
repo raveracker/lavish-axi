@@ -49,10 +49,7 @@ export function detectInvokingAgent(env = process.env) {
   return ["CODEX_SANDBOX", "CODEX_THREAD_ID"].some((key) => Object.hasOwn(env, key)) ? "codex" : "generic";
 }
 
-// Wait banners exist for a human watching a terminal. Under an agent harness stderr is piped
-// and merged into stdout capture, where every heartbeat tick becomes context tokens for no gain,
-// so narrate only on an interactive stderr.
-export function shouldNarratePollWait({ timeoutMs, isTTY }) {
+export function shouldNarratePollWaitTicks({ timeoutMs, isTTY }) {
   return !timeoutMs && Boolean(isTTY);
 }
 
@@ -263,9 +260,12 @@ async function pollCommand(args) {
   }
   const timeoutMs = flagValue(args, "--timeout-ms");
   const timeoutQuery = timeoutMs ? `&timeoutMs=${encodeURIComponent(timeoutMs)}` : "";
-  // The indefinite poll looks hung from a terminal's side (stdout stays empty until the user
-  // acts), so narrate the wait on an interactive stderr and leave re-run guidance behind if the
-  // agent's harness kills the process anyway. stderr keeps the stdout JSON contract intact.
+  // The indefinite poll looks hung from the agent's side (stdout stays empty until the user
+  // acts), so narrate the wait on stderr and leave re-run guidance behind if the agent's
+  // harness kills the process anyway. stderr keeps the stdout JSON contract intact.
+  // The one-shot banner is that "not hung" signal and stays unconditional; only the recurring
+  // ticks - one line per minute, unbounded - are gated on an interactive stderr so piped,
+  // merged agent captures do not accumulate them.
   const onPollSignal = (signal) => {
     process.stderr.write(`\n${pollInterruptedText(absolute)}\n`);
     process.exit(signal === "SIGINT" ? 130 : 143);
@@ -277,9 +277,12 @@ async function pollCommand(args) {
     process.on("SIGINT", onPollSignal);
     process.on("SIGTERM", onPollSignal);
   }
-  const waitReporter = shouldNarratePollWait({ timeoutMs, isTTY: process.stderr.isTTY })
-    ? startPollWaitReporter({ file: absolute })
-    : null;
+  const waitReporter = timeoutMs
+    ? null
+    : startPollWaitReporter({
+        file: absolute,
+        narrateTicks: shouldNarratePollWaitTicks({ timeoutMs, isTTY: process.stderr.isTTY }),
+      });
   try {
     const response = await fetchJson(`${baseUrl}/api/poll?file=${encodeURIComponent(absolute)}${timeoutQuery}`, {
       retries: 3,
@@ -320,8 +323,10 @@ export function startPollWaitReporter({
     process.stderr.write(line);
   },
   intervalMs = 60_000,
+  narrateTicks = true,
 }) {
   write(`${pollWaitBannerText(file)}\n`);
+  if (!narrateTicks) return { stop: () => {} };
   let elapsedMs = 0;
   const timer = setInterval(() => {
     elapsedMs += intervalMs;
