@@ -49,6 +49,9 @@ export function detectInvokingAgent(env = process.env) {
   return ["CODEX_SANDBOX", "CODEX_THREAD_ID"].some((key) => Object.hasOwn(env, key)) ? "codex" : "generic";
 }
 
+// Wait banners exist for a human watching a terminal. Under an agent harness stderr is piped
+// and merged into stdout capture, where every heartbeat tick becomes context tokens for no gain,
+// so narrate only on an interactive stderr.
 export function shouldNarratePollWait({ timeoutMs, isTTY }) {
   return !timeoutMs && Boolean(isTTY);
 }
@@ -260,9 +263,9 @@ async function pollCommand(args) {
   }
   const timeoutMs = flagValue(args, "--timeout-ms");
   const timeoutQuery = timeoutMs ? `&timeoutMs=${encodeURIComponent(timeoutMs)}` : "";
-  // The indefinite poll looks hung from the agent's side (stdout stays empty until the user
-  // acts), so narrate the wait on stderr and leave re-run guidance behind if the agent's
-  // harness kills the process anyway. stderr keeps the stdout JSON contract intact.
+  // The indefinite poll looks hung from a terminal's side (stdout stays empty until the user
+  // acts), so narrate the wait on an interactive stderr and leave re-run guidance behind if the
+  // agent's harness kills the process anyway. stderr keeps the stdout JSON contract intact.
   const onPollSignal = (signal) => {
     process.stderr.write(`\n${pollInterruptedText(absolute)}\n`);
     process.exit(signal === "SIGINT" ? 130 : 143);
