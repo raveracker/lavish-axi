@@ -49,8 +49,8 @@ export function detectInvokingAgent(env = process.env) {
   return ["CODEX_SANDBOX", "CODEX_THREAD_ID"].some((key) => Object.hasOwn(env, key)) ? "codex" : "generic";
 }
 
-export function shouldNarratePollWaitTicks({ timeoutMs, isTTY }) {
-  return !timeoutMs && Boolean(isTTY);
+export function shouldNarratePollWaitTicks({ isTTY }) {
+  return Boolean(isTTY);
 }
 
 export function pollExecutionGuidance({ agent = "generic" } = {}) {
@@ -281,7 +281,7 @@ async function pollCommand(args) {
     ? null
     : startPollWaitReporter({
         file: absolute,
-        narrateTicks: shouldNarratePollWaitTicks({ timeoutMs, isTTY: process.stderr.isTTY }),
+        narrateTicks: shouldNarratePollWaitTicks({ isTTY: process.stderr.isTTY }),
       });
   try {
     const response = await fetchJson(`${baseUrl}/api/poll?file=${encodeURIComponent(absolute)}${timeoutQuery}`, {

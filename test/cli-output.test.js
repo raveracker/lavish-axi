@@ -68,12 +68,19 @@ async function waitForPollListening(base, key, timeoutMs = 10_000) {
         continue;
       }
       const remaining = Math.max(1, deadline - Date.now());
-      const { value, done } = await Promise.race([
-        reader.read(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("timed out waiting for listening presence")), remaining),
-        ),
-      ]);
+      let timer;
+      let value;
+      let done;
+      try {
+        ({ value, done } = await Promise.race([
+          reader.read(),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error("timed out waiting for listening presence")), remaining);
+          }),
+        ]));
+      } finally {
+        clearTimeout(timer);
+      }
       if (done) throw new Error("presence stream closed before listening");
       buffer += decoder.decode(value, { stream: true });
     }
@@ -1402,13 +1409,12 @@ test("poll wait reporter still banners without ticks when narration is off", asy
 });
 
 test("shouldNarratePollWaitTicks heartbeats only in an interactive terminal", () => {
-  assert.equal(shouldNarratePollWaitTicks({ timeoutMs: undefined, isTTY: true }), true);
-  assert.equal(shouldNarratePollWaitTicks({ timeoutMs: undefined, isTTY: undefined }), false);
-  assert.equal(shouldNarratePollWaitTicks({ timeoutMs: undefined, isTTY: false }), false);
-  assert.equal(shouldNarratePollWaitTicks({ timeoutMs: "5000", isTTY: true }), false);
+  assert.equal(shouldNarratePollWaitTicks({ isTTY: true }), true);
+  assert.equal(shouldNarratePollWaitTicks({ isTTY: undefined }), false);
+  assert.equal(shouldNarratePollWaitTicks({ isTTY: false }), false);
 });
 
-test("spawned poll with piped stderr banners once, skips ticks, and leaves re-run guidance when killed", async () => {
+test("spawned poll with piped stderr banners once and leaves re-run guidance when killed", async () => {
   const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-poll-wait-test-`);
   const artifact = `${stateDir}/artifact.html`;
   await writeFile(artifact, "<html><body>hello</body></html>", "utf8");
@@ -1444,7 +1450,7 @@ test("spawned poll with piped stderr banners once, skips ticks, and leaves re-ru
       1,
       "piped stderr still gets the one-shot not-hung banner",
     );
-    assert.doesNotMatch(stderr, /Still waiting for user feedback/, "piped stderr suppresses the wait ticks");
+    assert.doesNotMatch(stderr, /Still waiting for user feedback/, "the banner carries no immediate wait tick");
 
     // Wait for "close" rather than "exit": "exit" can fire while the final stderr chunk is
     // still in flight, so asserting on stderr at "exit" races the guidance message.
